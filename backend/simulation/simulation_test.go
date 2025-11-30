@@ -7,6 +7,40 @@ import (
 	"time"
 )
 
+func TestGreatCircleDistanceAndBearing(t *testing.T) {
+	start := Point{Lat: 0, Lon: 0}
+	end := Point{Lat: 0, Lon: 90}
+	distance := GreatCircleDistance(start, end)
+	bearing := InitialBearing(start, end)
+
+	if math.Abs(distance-10007543) > 500 {
+		t.Fatalf("unexpected distance: got %.0f", distance)
+	}
+	if math.Abs(bearing-90) > 0.5 {
+		t.Fatalf("unexpected bearing: got %.2f", bearing)
+	}
+}
+
+func TestStepTowardsConverges(t *testing.T) {
+	start := Point{Lat: 47.0, Lon: -122.0}
+	end := Point{Lat: 47.0, Lon: -122.001}
+	speed := 30.0
+	dt := 1.0
+
+	current := start
+	for i := 0; i < 20; i++ {
+		var reached bool
+		current, reached = StepTowards(current, end, speed, dt)
+		if reached {
+			break
+		}
+	}
+
+	if GreatCircleDistance(current, end) > 1 {
+		t.Fatalf("expected to converge to target; remaining distance: %.2f", GreatCircleDistance(current, end))
+	}
+}
+
 func TestLifecycleStartStop(t *testing.T) {
 	cfg := Config{
 		NumTrucks:      5,
@@ -66,9 +100,9 @@ func TestUpdateFrequency(t *testing.T) {
 	time.Sleep(3*cfg.UpdateInterval + 10*time.Millisecond)
 	updated := manager.Trucks()[0]
 
-	distanceTraveled := math.Abs(updated.Lat - initial.Lat)
+	distanceTraveled := GreatCircleDistance(Point{Lat: initial.Lat, Lon: initial.Lon}, Point{Lat: updated.Lat, Lon: updated.Lon})
 	if distanceTraveled < expectedDistance*0.8 {
-		t.Fatalf("truck did not advance at expected frequency: moved %.4f want at least %.4f", distanceTraveled, expectedDistance*0.8)
+		t.Fatalf("truck did not advance at expected frequency: moved %.4fm want at least %.4fm", distanceTraveled, expectedDistance*0.8)
 	}
 }
 
@@ -123,5 +157,41 @@ func TestDeterministicSeedingAndStateMutation(t *testing.T) {
 	}
 	if !moved {
 		t.Fatalf("expected trucks to mutate state after a tick")
+	}
+}
+
+func TestRouteLoopsAndAdvancesWaypoints(t *testing.T) {
+	cfg := Config{
+		NumTrucks:         1,
+		Seed:              5,
+		SpeedMin:          200,
+		SpeedMax:          200,
+		WaypointsPerRoute: 2,
+		LoopRoutes:        true,
+		UpdateInterval:    50 * time.Millisecond,
+		StartPoints:       []Point{{Lat: 0, Lon: 0}},
+		EndPoints:         []Point{{Lat: 0, Lon: 0.001}},
+	}
+
+	manager := NewManager(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := manager.Start(ctx); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer manager.Stop()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		truck := manager.Trucks()[0]
+		distanceFromStart := GreatCircleDistance(Point{Lat: 0, Lon: 0}, Point{Lat: truck.Lat, Lon: truck.Lon})
+		if distanceFromStart < 30 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected truck to loop back near start, distance %.2f", distanceFromStart)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
