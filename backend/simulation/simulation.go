@@ -158,6 +158,13 @@ func (m *Manager) Stop() {
 	m.wg.Wait()
 }
 
+// Started returns whether the simulation is currently running.
+func (m *Manager) Started() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.started
+}
+
 // Trucks returns a snapshot copy of all simulated trucks.
 func (m *Manager) Trucks() []Truck {
 	m.mu.RLock()
