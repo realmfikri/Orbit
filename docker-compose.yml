@@ -1,0 +1,48 @@
+version: "3.9"
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      - ORBIT_ADDR=:8080
+      - ORBIT_TRUCKS=2000
+      - ORBIT_TICK_RATE=1s
+      - ORBIT_BOUNDING_BOX=37.0,-123.0,38.0,-121.0
+    ports:
+      - "8080:8080"
+    command: ["/app/orbitserver"]
+
+  frontend:
+    build:
+      context: ./web
+      dockerfile: ./Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "4173:80"
+
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["observability"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    depends_on:
+      - backend
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["observability"]
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
