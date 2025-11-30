@@ -2,24 +2,40 @@ package server
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"strconv"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"orbit/backend/simulation"
 )
 
+var apiLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "orbit_api_latency_seconds",
+	Help:    "Time spent serving HTTP handlers.",
+	Buckets: prometheus.DefBuckets,
+}, []string{"method", "path", "status"})
+
+func init() {
+	prometheus.MustRegister(apiLatency)
+}
+
 // Server exposes HTTP and WebSocket endpoints for the truck simulation.
 type Server struct {
-	sim          *simulation.Manager
-	wsUpgrader   websocket.Upgrader
-	wsInterval   time.Duration
-	wsChunkSize  int
-	defaultPage  int
-	defaultLimit int
+	sim               *simulation.Manager
+	wsUpgrader        websocket.Upgrader
+	wsInterval        time.Duration
+	wsChunkSize       int
+	defaultPage       int
+	defaultLimit      int
+	logger            *slog.Logger
+	correlationHeader string
+	adminEnabled      bool
 }
 
 // NewServer constructs a Server with sensible defaults for pagination and streaming.
@@ -29,20 +45,53 @@ func NewServer(sim *simulation.Manager) *Server {
 		wsUpgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		wsInterval:   2 * time.Second,
-		wsChunkSize:  200,
-		defaultPage:  1,
-		defaultLimit: 100,
+		wsInterval:        2 * time.Second,
+		wsChunkSize:       200,
+		defaultPage:       1,
+		defaultLimit:      100,
+		logger:            slog.Default(),
+		correlationHeader: "X-Correlation-ID",
 	}
+}
+
+// WithAdminEnabled enables admin-only endpoints like pprof.
+func (s *Server) WithAdminEnabled() *Server {
+	s.adminEnabled = true
+	return s
+}
+
+// WithLogger configures structured logging.
+func (s *Server) WithLogger(logger *slog.Logger) *Server {
+	if logger != nil {
+		s.logger = logger
+	}
+	return s
+}
+
+// WithCorrelationHeader configures the header used to propagate correlation IDs.
+func (s *Server) WithCorrelationHeader(header string) *Server {
+	if header != "" {
+		s.correlationHeader = header
+	}
+	return s
 }
 
 // Routes returns an http.Handler that serves all endpoints.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/readyz", s.handleReadiness)
-	mux.HandleFunc("/api/trucks", s.handleTrucks)
-	mux.HandleFunc("/ws/trucks", s.handleTrucksWebSocket)
+	mux.HandleFunc("/healthz", s.wrap(s.handleHealth))
+	mux.HandleFunc("/readyz", s.wrap(s.handleReadiness))
+	mux.HandleFunc("/api/trucks", s.wrap(s.handleTrucks))
+	mux.HandleFunc("/ws/trucks", s.wrap(s.handleTrucksWebSocket))
+	mux.Handle("/metrics", promhttp.Handler())
+
+	if s.adminEnabled {
+		mux.HandleFunc("/admin/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/admin/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/admin/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/admin/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/admin/debug/pprof/trace", pprof.Trace)
+	}
 	return mux
 }
 
@@ -108,7 +157,7 @@ func (s *Server) handleTrucks(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTrucksWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("websocket upgrade failed: %v", err)
+		s.logger.Error("websocket upgrade failed", "err", err, "correlation_id", correlationIDFromContext(r.Context()))
 		return
 	}
 	defer conn.Close()
@@ -125,7 +174,7 @@ func (s *Server) handleTrucksWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := sendSnapshot(); err != nil {
-		log.Printf("websocket initial send failed: %v", err)
+		s.logger.Error("websocket initial send failed", "err", err, "correlation_id", correlationIDFromContext(r.Context()))
 		return
 	}
 
@@ -135,7 +184,7 @@ func (s *Server) handleTrucksWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-ticker.C:
 			if err := sendSnapshot(); err != nil {
-				log.Printf("websocket send failed: %v", err)
+				s.logger.Error("websocket send failed", "err", err, "correlation_id", correlationIDFromContext(r.Context()))
 				return
 			}
 		}
