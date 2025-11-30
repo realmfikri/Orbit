@@ -67,13 +67,15 @@ type Manager struct {
 	trucks map[string]*Truck
 	routes map[string]*routeState
 
-	cfg    Config
-	rand   *rand.Rand
-	ticker *time.Ticker
+	cfg      Config
+	rand     *rand.Rand
+	ticker   *time.Ticker
+	lastTick time.Time
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	tickSubs []chan time.Time
 
 	started bool
 }
@@ -123,6 +125,8 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.started = true
 	m.ctx, m.cancel = context.WithCancel(ctx)
 	m.ticker = time.NewTicker(m.cfg.UpdateInterval)
+	m.lastTick = time.Now()
+	m.tickSubs = make([]chan time.Time, 0, m.cfg.NumTrucks)
 
 	for i := 0; i < m.cfg.NumTrucks; i++ {
 		truck := m.buildTruck(i)
@@ -130,9 +134,14 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	for _, truck := range m.trucks {
+		tickCh := make(chan time.Time, 1)
+		m.tickSubs = append(m.tickSubs, tickCh)
 		m.wg.Add(1)
-		go m.runTruck(truck)
+		go m.runTruck(truck, tickCh)
 	}
+
+	m.wg.Add(1)
+	go m.runTicker()
 
 	return nil
 }
@@ -180,14 +189,34 @@ func (m *Manager) Trucks() []Truck {
 	return trucks
 }
 
-func (m *Manager) runTruck(truck *Truck) {
+func (m *Manager) runTruck(truck *Truck, tickCh <-chan time.Time) {
 	defer m.wg.Done()
 	for {
 		select {
 		case <-m.ctx.Done():
 			return
-		case <-m.ticker.C:
+		case <-tickCh:
+			start := time.Now()
 			m.advanceTruck(truck)
+			updateDuration.Observe(time.Since(start).Seconds())
+		}
+	}
+}
+
+func (m *Manager) runTicker() {
+	defer m.wg.Done()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case t := <-m.ticker.C:
+			m.recordTickLatency(t)
+			for _, ch := range m.tickSubs {
+				select {
+				case ch <- t:
+				default:
+				}
+			}
 		}
 	}
 }
@@ -222,6 +251,20 @@ func (m *Manager) advanceTruck(truck *Truck) {
 	if reached {
 		state.advance(next, m.rand)
 	}
+}
+
+func (m *Manager) recordTickLatency(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.lastTick.IsZero() {
+		m.lastTick = now
+		return
+	}
+
+	delta := now.Sub(m.lastTick)
+	m.lastTick = now
+	tickLatency.Observe(delta.Seconds())
 }
 
 func (m *Manager) buildTruck(index int) *Truck {
