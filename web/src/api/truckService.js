@@ -1,5 +1,10 @@
 const DEFAULT_STATUSES = ['idle', 'enroute', 'charging', 'offline']
 const DEFAULT_REGIONS = ['north', 'south', 'east', 'west']
+const DEFAULT_SIMULATION_CONFIG = {
+  numTrucks: 2000,
+  updateIntervalMs: 1000,
+  boundingBox: null,
+}
 
 const seededTrucks = Array.from({ length: 50 }).map((_, index) => {
   const region = DEFAULT_REGIONS[index % DEFAULT_REGIONS.length]
@@ -29,6 +34,36 @@ export async function fetchTrucks(signal) {
     console.warn('Falling back to seeded trucks', error)
     return seededTrucks
   }
+}
+
+export async function fetchSimulationConfig(signal) {
+  try {
+    const response = await fetch('/api/simulation/config', { signal })
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+    const payload = await response.json()
+    if (payload && typeof payload.numTrucks === 'number') {
+      return payload
+    }
+  } catch (error) {
+    console.warn('Falling back to default simulation config', error)
+  }
+  return DEFAULT_SIMULATION_CONFIG
+}
+
+export async function updateSimulationConfig(body) {
+  const response = await fetch('/api/simulation/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(text || `HTTP ${response.status}`)
+  }
+  return response.json()
 }
 
 export function createTruckSubscriber({ onMessage, onError }) {
@@ -73,4 +108,4 @@ export function createTruckSubscriber({ onMessage, onError }) {
   }
 }
 
-export { DEFAULT_REGIONS, DEFAULT_STATUSES }
+export { DEFAULT_REGIONS, DEFAULT_SIMULATION_CONFIG, DEFAULT_STATUSES }

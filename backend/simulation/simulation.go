@@ -61,27 +61,14 @@ type routeState struct {
 	loop      bool
 }
 
-// Manager coordinates simulated truck updates using a shared ticker.
-type Manager struct {
-	mu     sync.RWMutex
-	trucks map[string]*Truck
-	routes map[string]*routeState
-
-	cfg      Config
-	rand     *rand.Rand
-	ticker   *time.Ticker
-	lastTick time.Time
-
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	tickSubs []chan time.Time
-
-	started bool
+// ConfigUpdate captures partial updates that can be applied to a running simulation.
+type ConfigUpdate struct {
+	NumTrucks      *int
+	UpdateInterval *time.Duration
+	BoundingBox    *BoundingBox
 }
 
-// NewManager creates a manager with deterministic seeding and defaults.
-func NewManager(cfg Config) *Manager {
+func normalizeConfig(cfg Config) Config {
 	if cfg.NumTrucks <= 0 {
 		cfg.NumTrucks = defaultNumTrucks
 	}
@@ -107,11 +94,47 @@ func NewManager(cfg Config) *Manager {
 		cfg.UpdateInterval = defaultInterval
 	}
 
+	return cfg
+}
+
+func cloneConfig(cfg Config) Config {
+	cfg.StartPoints = append([]Point{}, cfg.StartPoints...)
+	cfg.EndPoints = append([]Point{}, cfg.EndPoints...)
+	cfg.RouteBounds = append([]BoundingBox{}, cfg.RouteBounds...)
+	return cfg
+}
+
+// Manager coordinates simulated truck updates using a shared ticker.
+type Manager struct {
+	mu     sync.RWMutex
+	trucks map[string]*Truck
+	routes map[string]*routeState
+
+	cfg      Config
+	initial  Config
+	rand     *rand.Rand
+	ticker   *time.Ticker
+	lastTick time.Time
+
+	ctx      context.Context
+	cancel   context.CancelFunc
+	baseCtx  context.Context
+	wg       sync.WaitGroup
+	tickSubs []chan time.Time
+
+	started bool
+}
+
+// NewManager creates a manager with deterministic seeding and defaults.
+func NewManager(cfg Config) *Manager {
+	cfg = normalizeConfig(cfg)
+
 	return &Manager{
-		trucks: make(map[string]*Truck, cfg.NumTrucks),
-		routes: make(map[string]*routeState, cfg.NumTrucks),
-		cfg:    cfg,
-		rand:   rand.New(rand.NewSource(cfg.Seed)),
+		trucks:  make(map[string]*Truck, cfg.NumTrucks),
+		routes:  make(map[string]*routeState, cfg.NumTrucks),
+		cfg:     cfg,
+		initial: cfg,
+		rand:    rand.New(rand.NewSource(cfg.Seed)),
 	}
 }
 
@@ -123,7 +146,10 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("simulation already started")
 	}
 	m.started = true
-	m.ctx, m.cancel = context.WithCancel(ctx)
+	if m.baseCtx == nil {
+		m.baseCtx = ctx
+	}
+	m.ctx, m.cancel = context.WithCancel(m.baseCtx)
 	m.ticker = time.NewTicker(m.cfg.UpdateInterval)
 	m.lastTick = time.Now()
 	m.tickSubs = make([]chan time.Time, 0, m.cfg.NumTrucks)
@@ -165,6 +191,72 @@ func (m *Manager) Stop() {
 		ticker.Stop()
 	}
 	m.wg.Wait()
+}
+
+// Config returns a copy of the current simulation configuration.
+func (m *Manager) Config() Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return cloneConfig(m.cfg)
+}
+
+// InitialConfig returns the initial configuration the manager was created with.
+func (m *Manager) InitialConfig() Config {
+	return cloneConfig(m.initial)
+}
+
+// ApplyConfig restarts the simulation using the provided configuration.
+func (m *Manager) ApplyConfig(cfg Config) error {
+	m.mu.RLock()
+	baseCtx := m.baseCtx
+	started := m.started
+	m.mu.RUnlock()
+
+	if !started {
+		return fmt.Errorf("simulation not started")
+	}
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
+	m.Stop()
+
+	cfg = cloneConfig(normalizeConfig(cfg))
+	m.mu.Lock()
+	m.resetLocked(cfg)
+	m.mu.Unlock()
+
+	return m.Start(baseCtx)
+}
+
+// ApplyUpdate merges the provided updates into the current configuration and restarts the simulation.
+func (m *Manager) ApplyUpdate(update ConfigUpdate) (Config, error) {
+	cfg := m.Config()
+
+	if update.NumTrucks != nil {
+		cfg.NumTrucks = *update.NumTrucks
+	}
+	if update.UpdateInterval != nil {
+		cfg.UpdateInterval = *update.UpdateInterval
+	}
+	if update.BoundingBox != nil {
+		cfg.RouteBounds = []BoundingBox{*update.BoundingBox}
+	}
+
+	if err := m.ApplyConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	return m.Config(), nil
+}
+
+func (m *Manager) resetLocked(cfg Config) {
+	m.cfg = cfg
+	m.trucks = make(map[string]*Truck, cfg.NumTrucks)
+	m.routes = make(map[string]*routeState, cfg.NumTrucks)
+	m.rand = rand.New(rand.NewSource(cfg.Seed))
+	m.tickSubs = nil
+	m.ticker = nil
+	m.lastTick = time.Time{}
 }
 
 // Started returns whether the simulation is currently running.
