@@ -12,7 +12,10 @@ import {
   createTruckSubscriber,
   DEFAULT_REGIONS,
   DEFAULT_STATUSES,
+  DEFAULT_SIMULATION_CONFIG,
   fetchTrucks,
+  fetchSimulationConfig,
+  updateSimulationConfig,
 } from './api/truckService'
 import './App.css'
 import 'leaflet/dist/leaflet.css'
@@ -24,6 +27,30 @@ const statusColors = {
   enroute: '#60a5fa',
   charging: '#fbbf24',
   offline: '#9ca3af',
+}
+
+const BOUNDING_BOX_PRESETS = [
+  { id: 'none', label: 'No bounds', box: null },
+  { id: 'bay', label: 'SF Bay Area', box: { minLat: 37.2, maxLat: 38.2, minLon: -123.2, maxLon: -121.5 } },
+  { id: 'pnw', label: 'Pacific Northwest', box: { minLat: 45.2, maxLat: 48.5, minLon: -124.8, maxLon: -120.5 } },
+]
+
+function resolvePresetForBox(box) {
+  if (!box) return 'none'
+  const match = BOUNDING_BOX_PRESETS.find(
+    (preset) =>
+      preset.box &&
+      preset.box.minLat === box.minLat &&
+      preset.box.maxLat === box.maxLat &&
+      preset.box.minLon === box.minLon &&
+      preset.box.maxLon === box.maxLon,
+  )
+  return match?.id ?? 'none'
+}
+
+function describeBoundingBox(box) {
+  if (!box) return 'No bounding box'
+  return `${box.minLat.toFixed(2)}, ${box.minLon.toFixed(2)} to ${box.maxLat.toFixed(2)}, ${box.maxLon.toFixed(2)}`
 }
 
 function SimulationControls({ isRunning, speedMultiplier, onToggle, onSpeedChange }) {
@@ -79,6 +106,110 @@ function FilterControls({ filters, onChange, availableRegions }) {
           ))}
         </select>
       </div>
+    </div>
+  )
+}
+
+function SimulationConfigControls({
+  values,
+  preset,
+  onPresetChange,
+  onFieldChange,
+  onSubmit,
+  onRestore,
+  isSaving,
+  toast,
+}) {
+  return (
+    <div className="panel">
+      <div className="panel-header">Configuration</div>
+
+      <div className="control-row">
+        <label className="control-label" htmlFor="truck-count">
+          Trucks
+        </label>
+        <input
+          id="truck-count"
+          type="range"
+          min="10"
+          max="5000"
+          step="10"
+          value={values.numTrucks}
+          onChange={(event) => onFieldChange({ ...values, numTrucks: Number(event.target.value) })}
+          disabled={isSaving}
+        />
+        <input
+          aria-label="Truck count"
+          data-testid="num-trucks-input"
+          type="number"
+          min="10"
+          max="5000"
+          value={values.numTrucks}
+          onChange={(event) => onFieldChange({ ...values, numTrucks: Number(event.target.value) })}
+          disabled={isSaving}
+        />
+      </div>
+
+      <div className="control-row">
+        <label className="control-label" htmlFor="update-interval">
+          Tick (ms)
+        </label>
+        <input
+          id="update-interval"
+          type="range"
+          min="100"
+          max="5000"
+          step="50"
+          value={values.updateIntervalMs}
+          onChange={(event) => onFieldChange({ ...values, updateIntervalMs: Number(event.target.value) })}
+          disabled={isSaving}
+        />
+        <input
+          aria-label="Update interval"
+          data-testid="update-interval-input"
+          type="number"
+          min="100"
+          max="5000"
+          value={values.updateIntervalMs}
+          onChange={(event) => onFieldChange({ ...values, updateIntervalMs: Number(event.target.value) })}
+          disabled={isSaving}
+        />
+      </div>
+
+      <div className="control-row">
+        <label className="control-label" htmlFor="bbox-preset">
+          Bounds
+        </label>
+        <select
+          id="bbox-preset"
+          value={preset}
+          onChange={(event) => onPresetChange(event.target.value)}
+          disabled={isSaving}
+        >
+          {BOUNDING_BOX_PRESETS.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="muted">Current: {describeBoundingBox(values.boundingBox)}</div>
+
+      <div className="control-row">
+        <button type="button" onClick={onSubmit} disabled={isSaving} data-testid="apply-config">
+          {isSaving ? 'Saving…' : 'Apply config'}
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          onClick={onRestore}
+          disabled={isSaving}
+          data-testid="restore-defaults"
+        >
+          Restore defaults
+        </button>
+      </div>
+      {toast?.message && <div className={`toast ${toast.tone}`}>{toast.message}</div>}
     </div>
   )
 }
@@ -201,6 +332,10 @@ function applyFilters(trucks, filters) {
 
 export default function App() {
   const [trucks, setTrucks] = useState([])
+  const [configDraft, setConfigDraft] = useState(DEFAULT_SIMULATION_CONFIG)
+  const [configPreset, setConfigPreset] = useState('none')
+  const [isSavingConfig, setIsSavingConfig] = useState(false)
+  const [configToast, setConfigToast] = useState(null)
   const [isRunning, setIsRunning] = useState(true)
   const [speedMultiplier, setSpeedMultiplier] = useState(1)
   const [filters, setFilters] = useState({ status: 'all', region: 'all' })
@@ -213,6 +348,61 @@ export default function App() {
       .catch((err) => setError(err.message))
     return () => controller.abort()
   }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchSimulationConfig(controller.signal)
+      .then((cfg) => {
+        setConfigDraft({ ...DEFAULT_SIMULATION_CONFIG, ...cfg })
+        setConfigPreset(resolvePresetForBox(cfg.boundingBox))
+      })
+      .catch((err) => setConfigToast({ tone: 'error', message: err.message }))
+
+    return () => controller.abort()
+  }, [])
+
+  const handlePresetChange = (value) => {
+    setConfigPreset(value)
+    const preset = BOUNDING_BOX_PRESETS.find((option) => option.id === value)
+    setConfigDraft((current) => ({ ...current, boundingBox: preset?.box ?? null }))
+  }
+
+  const handleApplyConfig = async () => {
+    setIsSavingConfig(true)
+    setConfigToast(null)
+    try {
+      const payload = {
+        numTrucks: Number(configDraft.numTrucks),
+        updateIntervalMs: Number(configDraft.updateIntervalMs),
+      }
+      if (configDraft.boundingBox && configPreset !== 'none') {
+        payload.boundingBox = configDraft.boundingBox
+      }
+      const updated = await updateSimulationConfig(payload)
+      setConfigDraft({ ...DEFAULT_SIMULATION_CONFIG, ...updated })
+      setConfigPreset(resolvePresetForBox(updated.boundingBox))
+      setConfigToast({ tone: 'success', message: 'Configuration saved' })
+    } catch (err) {
+      setConfigToast({ tone: 'error', message: err?.message ?? 'Failed to update configuration' })
+    } finally {
+      setIsSavingConfig(false)
+    }
+  }
+
+  const handleRestoreDefaults = async () => {
+    setIsSavingConfig(true)
+    setConfigToast(null)
+    try {
+      const updated = await updateSimulationConfig({ restoreDefaults: true })
+      setConfigDraft({ ...DEFAULT_SIMULATION_CONFIG, ...updated })
+      setConfigPreset(resolvePresetForBox(updated.boundingBox))
+      setConfigToast({ tone: 'success', message: 'Defaults restored' })
+    } catch (err) {
+      setConfigToast({ tone: 'error', message: err?.message ?? 'Failed to restore defaults' })
+    } finally {
+      setIsSavingConfig(false)
+    }
+  }
 
   useEffect(() => {
     if (!isRunning) return undefined
@@ -297,6 +487,16 @@ export default function App() {
         </section>
 
         <aside className="sidebar">
+          <SimulationConfigControls
+            values={configDraft}
+            preset={configPreset}
+            onPresetChange={handlePresetChange}
+            onFieldChange={setConfigDraft}
+            onSubmit={handleApplyConfig}
+            onRestore={handleRestoreDefaults}
+            isSaving={isSavingConfig}
+            toast={configToast}
+          />
           <SimulationControls
             isRunning={isRunning}
             speedMultiplier={speedMultiplier}

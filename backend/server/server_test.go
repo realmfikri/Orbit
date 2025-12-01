@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,76 @@ func TestTrucksPagination(t *testing.T) {
 	if resp.Total != 5 {
 		t.Fatalf("expected total 5 got %d", resp.Total)
 	}
+}
+
+func TestSimulationConfigEndpoint(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+
+	router := srv.Routes()
+
+	t.Run("get current config", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/simulation/config", nil))
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status: %d", rr.Code)
+		}
+
+		var resp simulationConfigResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+
+		if resp.NumTrucks != 5 || resp.UpdateIntervalMs <= 0 {
+			t.Fatalf("unexpected config response: %+v", resp)
+		}
+	})
+
+	t.Run("apply new config", func(t *testing.T) {
+		body := strings.NewReader(`{"numTrucks":3,"updateIntervalMs":25,"boundingBox":{"minLat":0,"minLon":0,"maxLat":1,"maxLon":1}}`)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/simulation/config", body))
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status: %d", rr.Code)
+		}
+
+		var resp simulationConfigResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+
+		if resp.NumTrucks != 3 || resp.UpdateIntervalMs != 25 || resp.BoundingBox == nil {
+			t.Fatalf("unexpected response after update: %+v", resp)
+		}
+
+		if got := len(srv.sim.Trucks()); got != 3 {
+			t.Fatalf("expected 3 trucks after update, got %d", got)
+		}
+		if srv.sim.Config().RouteBounds == nil {
+			t.Fatalf("expected bounding box applied")
+		}
+	})
+
+	t.Run("restore defaults", func(t *testing.T) {
+		body := strings.NewReader(`{"restoreDefaults":true}`)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/simulation/config", body))
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status: %d", rr.Code)
+		}
+
+		var resp simulationConfigResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+
+		if resp.NumTrucks != 5 {
+			t.Fatalf("expected defaults restored, got %+v", resp)
+		}
+	})
 }
 
 func TestWebSocketStream(t *testing.T) {
